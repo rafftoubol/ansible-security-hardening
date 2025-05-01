@@ -1,0 +1,157 @@
+---
+# Playbook for securing the Ansible control node
+- name: Secure Ansible Control Node
+  hosts: masters  # use the name for the control node group, in my case master
+  become: yes
+  vars:
+    admin_group: ansible_admins
+    admin_users:
+      - rato1426 #using my user, could be any admins account
+    ansible_vault_path: /etc/ansible/vault
+    ssh_keys_path: /etc/ansible/ssh_keys # from fresh setup use not userdir /home/rato1426/.ssh
+    ansible_projects_path: /etc/ansible/projects
+    
+  tasks:
+    # System hardening
+    - name: Update all packages
+      ansible.builtin.package:
+        name: "*"
+        state: latest
+        
+    - name: Install security packages
+      ansible.builtin.package:
+        name:
+          - fail2ban
+          - auditd
+          - aide
+          - ufw
+        state: present
+        # ootb uncomplicated firewall blocks all incoming connections, allows all outgoing and does no routing
+    - name: Enable and configure firewall
+      ansible.builtin.ufw:
+        state: enabled
+        policy: deny
+        #lets allow inbound SSH, remembering that we should only allow ssh through the admin user group
+    - name: Allow SSH through firewall
+      ansible.builtin.ufw:
+        rule: allow
+        port: ssh
+        proto: tcp
+        #now we can enforce no pw login for ssh, no root login (enforce user->sudo), force keys, and have no empty pws
+    - name: Set strong SSH configuration
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regex: "{{ item.regex }}"
+        line: "{{ item.line }}"
+        state: present
+      loop:
+        - { regex: '^#?PasswordAuthentication', line: 'PasswordAuthentication no' }
+        - { regex: '^#?PermitRootLogin', line: 'PermitRootLogin no' }
+        - { regex: '^#?PubkeyAuthentication', line: 'PubkeyAuthentication yes' }
+        - { regex: '^#?PermitEmptyPasswords', line: 'PermitEmptyPasswords no' }
+      notify: restart sshd
+      
+    # Set up administrators
+    - name: Create admin group
+      ansible.builtin.group:
+        name: "{{ admin_group }}"
+        state: present
+        
+    - name: Create admin users
+      ansible.builtin.user:
+        name: "{{ item }}"
+        groups: "{{ admin_group }}"
+        shell: /bin/bash
+      loop: "{{ admin_users }}"
+      
+    - name: Configure sudo access for admin group
+      ansible.builtin.lineinfile:
+        path: /etc/sudoers.d/ansible_admins
+        line: "%{{ admin_group }} ALL=(ALL) ALL"
+        create: yes
+        mode: '0440'
+        validate: visudo -cf %s
+        
+    # Set up secure directory structure
+    - name: Create secure directory structure
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: "{{ admin_group }}"
+        mode: '0750'
+      loop:
+        - "{{ ansible_vault_path }}"
+        - "{{ ssh_keys_path }}"
+        - "{{ ansible_projects_path }}"
+        
+    - name: Create SSH key directory for automation
+      ansible.builtin.file:
+        path: "{{ ssh_keys_path }}/automation"
+        state: directory
+        owner: root
+        group: "{{ admin_group }}"
+        mode: '0750'
+        
+    # Secure SSH keys with restricted permissions
+    - name: Set tight permissions on SSH keys directory
+      ansible.builtin.file:
+        path: "{{ ssh_keys_path }}"
+        state: directory
+        recurse: yes
+        mode: '0750'
+        
+    # Implement audit logging
+    - name: Configure audit logging for ansible commands
+      ansible.builtin.lineinfile:
+        path: /etc/audit/rules.d/ansible.rules
+        line: "-w /usr/bin/ansible -p x -k ansible_execution"
+        create: yes
+        
+    - name: Configure audit logging for ansible-playbook commands
+      ansible.builtin.lineinfile:
+        path: /etc/audit/rules.d/ansible.rules
+        line: "-w /usr/bin/ansible-playbook -p x -k ansible_execution"
+        
+    - name: Configure audit logging for vault access
+      ansible.builtin.lineinfile:
+        path: /etc/audit/rules.d/ansible.rules
+        line: "-w {{ ansible_vault_path }} -p rwa -k ansible_vault_access"
+        
+    - name: Reload audit rules
+      ansible.builtin.command:
+        cmd: auditctl -R /etc/audit/rules.d/ansible.rules
+        
+    # Set up secure history logging
+    - name: Configure bash history settings for better auditing
+      ansible.builtin.blockinfile:
+        path: /etc/profile.d/ansible-history.sh
+        create: yes
+        block: |
+          # Enhanced history settings for auditing
+          export HISTTIMEFORMAT="%F %T "
+          export HISTSIZE=10000
+          export HISTFILESIZE=10000
+          export HISTCONTROL=ignoredups
+          export PROMPT_COMMAND='history -a'
+          readonly HISTFILE
+          readonly HISTFILESIZE
+          readonly HISTSIZE
+          readonly HISTTIMEFORMAT
+          readonly PROMPT_COMMAND
+          shopt -s histappend
+          
+    # Configure git to safeguard credentials
+    - name: Configure global git settings for security
+      ansible.builtin.template:
+        src: templates/gitconfig.j2
+        dest: /etc/gitconfig
+        owner: root
+        group: root
+        mode: '0644'
+        
+  handlers:
+    - name: restart sshd
+      ansible.builtin.service:
+        name: "{{ 'ssh' if ansible_os_family == 'Debian' else 'sshd' }}"
+        state: restarted

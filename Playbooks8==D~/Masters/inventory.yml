@@ -1,0 +1,17 @@
+---
+
+# This is a basic ansible inventory file which sets the control node as the localhost
+# We get a group for all the downstream nodes called slaves
+# Hosts can exist in multiple groups, e.g they all exist in "all"
+# We put them all in an all group incase we want to define vars which apply to all
+
+all:
+  masters:
+    hosts:
+      localhost:
+        ansible_connection: local
+  slaves:
+    hosts:
+      slavevm1:
+        ansible_host: 10.0.1.229
+      
