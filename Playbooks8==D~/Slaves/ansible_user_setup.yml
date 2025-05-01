@@ -1,0 +1,75 @@
+---
+# Playbook to create and configure a dedicated Ansible user with appropriate permissions
+- name: Set up dedicated Ansible user
+  hosts: all
+  become: yes
+  vars:
+    ansible_user_name: ansible
+    ansible_user_group: ansible
+    # Generate this beforehand with: ssh-keygen -t ed25519 -C "ansible@control-node"
+    # Then copy the content of the public key (~/.ssh/id_ed25519.pub)
+    ansible_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyReplaceMeWithYourActualPublicKey ansible@control-node"
+    # Sudoers file path based on OS type
+    sudoers_file: "{% if ansible_os_family == 'Debian' %}/etc/sudoers.d/ansible{% else %}/etc/sudoers.d/ansible{% endif %}"
+    
+  tasks:
+    - name: Create Ansible group
+      ansible.builtin.group:
+        name: "{{ ansible_user_group }}"
+        state: present
+      
+    - name: Create Ansible user
+      ansible.builtin.user:
+        name: "{{ ansible_user_name }}"
+        group: "{{ ansible_user_group }}"
+        shell: /bin/bash
+        create_home: yes
+        comment: "Dedicated user for Ansible automation"
+        state: present
+      
+    - name: Create .ssh directory for Ansible user
+      ansible.builtin.file:
+        path: "/home/{{ ansible_user_name }}/.ssh"
+        state: directory
+        owner: "{{ ansible_user_name }}"
+        group: "{{ ansible_user_group }}"
+        mode: '0700'
+    
+    - name: Add public key to authorized_keys
+      ansible.builtin.lineinfile:
+        path: "/home/{{ ansible_user_name }}/.ssh/authorized_keys"
+        line: "{{ ansible_public_key }}"
+        create: yes
+        owner: "{{ ansible_user_name }}"
+        group: "{{ ansible_user_group }}"
+        mode: '0600'
+        
+    - name: Set up passwordless sudo for specific commands
+      ansible.builtin.lineinfile:
+        path: "{{ sudoers_file }}"
+        line: "{{ ansible_user_name }} ALL=(ALL) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt, /usr/bin/apt-cache, /usr/bin/dpkg, /usr/bin/yum, /usr/bin/dnf, /bin/systemctl, /sbin/service, /usr/sbin/service, /sbin/iptables, /usr/sbin/ufw, /usr/bin/firewall-cmd, /usr/bin/find, /usr/bin/cp, /usr/bin/mv, /usr/bin/chmod, /usr/bin/chown, /usr/sbin/usermod, /usr/sbin/useradd, /usr/sbin/userdel, /usr/bin/rsync, /usr/bin/journalctl"
+        create: yes
+        owner: root
+        group: root
+        mode: '0440'
+        validate: 'visudo -cf %s'
+    
+    # Security hardening for the Ansible user
+    - name: Disable password authentication for Ansible user
+      ansible.builtin.user:
+        name: "{{ ansible_user_name }}"
+        password_lock: yes
+        
+    - name: Restrict SSH access to Ansible user
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regex: '^AllowUsers'
+        line: "AllowUsers {{ ansible_user_name }} {{ existing_ssh_users | default('') }}"
+        state: present
+      register: ssh_config
+      
+    - name: Restart SSH service if config changed
+      ansible.builtin.service:
+        name: "{{ 'ssh' if ansible_os_family == 'Debian' else 'sshd' }}"
+        state: restarted
+      when: ssh_config.changed
