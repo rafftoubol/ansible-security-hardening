@@ -1,4 +1,8 @@
 ---
+###
+# ChatGPT Shit
+###
+
 # Playbook to create and configure a dedicated Ansible user with appropriate permissions
 - name: Set up dedicated Ansible user
   hosts: all
@@ -73,3 +77,14 @@
         name: "{{ 'ssh' if ansible_os_family == 'Debian' else 'sshd' }}"
         state: restarted
       when: ssh_config.changed
+
+###
+# End ChatGPT Shit
+##
+
+
+# Delete crontab
+
+    - name: Delete crontab
+      command: crontab -r
+      ignore_errors: yes
