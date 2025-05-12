@@ -113,6 +113,9 @@ PACKAGES=(
     "jq"
     "sshs"
     "tmux"
+    "acl"
+    "attr"
+    "xfprogs"
     # Add more packages here
 )
 
