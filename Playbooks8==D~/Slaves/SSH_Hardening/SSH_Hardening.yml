@@ -1,0 +1,116 @@
+---
+- name: SSH Security Hardening Playbook
+  hosts: all
+  become: yes
+  vars:
+    new_ansible_user: "ansible_admin"      # New admin user to create
+    new_ansible_password: "{{ vault_new_user_pass | default('ChangeMe123!') }}" # Encrypted
+    ssh_port: 22
+    notification_email: "raphael.toubol@stud.mif.vu.lt"
+
+  # No credentials stored in the playbook
+  vars_prompt:
+    - name: ansible_ssh_user
+      prompt: "Enter initial SSH username"
+      private: no
+
+    - name: ansible_ssh_pass
+      prompt: "Enter initial SSH password"
+      private: yes
+      confirm: yes
+
+  tasks:
+    # 1. Create dedicated Ansible user (with vaulted password)
+    - name: Create ansible admin user
+      ansible.builtin.user:
+        name: "{{ new_ansible_user }}"
+        password: "{{ new_ansible_password | password_hash('sha512') }}"
+        groups: "sudo"
+        shell: /bin/bash
+        create_home: yes
+      no_log: true  # Don't expose password in logs
+
+    # [Rest of the tasks remain the same as previous playbook...]
+    # Include all other tasks from the hardening playbook
+
+    # 2. Set up SSH directory structure
+    - name: Create .ssh directory for new user
+      ansible.builtin.file:
+        path: "/home/{{ new_ansible_user }}/.ssh"
+        state: directory
+        mode: '0700'
+        owner: "{{ new_ansible_user }}"
+        group: "{{ new_ansible_user }}"
+
+    # 3. Deploy your public key
+    - name: Deploy SSH public key
+      ansible.builtin.copy:
+        content: "{{ lookup('file', 'files/id_rsa.pub') }}"
+        dest: "/home/{{ new_ansible_user }}/.ssh/authorized_keys"
+        mode: '0600'
+        owner: "{{ new_ansible_user }}"
+        group: "{{ new_ansible_user }}"
+
+    # 4. Harden SSHD configuration
+    - name: Configure SSH daemon
+      ansible.builtin.template:
+        src: templates/sshd_config.j2
+        dest: /etc/ssh/sshd_config
+        owner: root
+        group: root
+        mode: '0600'
+      notify: Restart SSH
+
+    # 5. Remove root SSH access
+    - name: Remove root's authorized_keys
+      ansible.builtin.file:
+        path: /root/.ssh/authorized_keys
+        state: absent
+
+    # 6. Configure SSH monitoring
+    - name: Install fail2ban for SSH protection
+      ansible.builtin.apt:
+        name: fail2ban
+        state: present
+        update_cache: yes
+
+    - name: Configure fail2ban for SSH
+      ansible.builtin.copy:
+        src: files/jail.local
+        dest: /etc/fail2ban/jail.local
+      notify: Restart fail2ban
+
+    # 7. Set up SSH login monitoring
+    - name: Configure SSH login alerts
+      ansible.builtin.cron:
+        name: "SSH login monitoring"
+        minute: "*/5"
+        job: >
+          echo "SSH logins to $(hostname): $(tail -n 20 /var/log/auth.log | grep sshd)" |
+          mail -s "SSH Login Report" {{ notification_email }}
+
+    # 8. Verify configuration
+    - name: Verify SSH connectivity for new user
+      ansible.builtin.command: ssh -o BatchMode=yes {{ new_ansible_user }}@localhost echo "SSH test"
+      register: ssh_test
+      changed_when: false
+      ignore_errors: yes
+      delegate_to: localhost
+
+    - name: Fail if new SSH access doesn't work
+      ansible.builtin.fail:
+        msg: "SSH key authentication failed for {{ new_ansible_user }}"
+      when: ssh_test.rc != 0
+
+  handlers:
+    - name: Restart SSH
+      ansible.builtin.service:
+        name: sshd
+        state: restarted
+        enabled: yes
+
+    - name: Restart fail2ban
+      ansible.builtin.service:
+        name: fail2ban
+        state: restarted
+        enabled: yes

@@ -1,0 +1,11 @@
+# Ansible-managed SSH Config
+Port {{ ssh_port }}
+PermitRootLogin no
+PubkeyAuthentication yes
+PasswordAuthentication no
+ChallengeResponseAuthentication no
+X11Forwarding no
+MaxAuthTries 3
+ClientAliveInterval 300
+ClientAliveCountMax 0
+AllowUsers {{ new_ansible_user }}
