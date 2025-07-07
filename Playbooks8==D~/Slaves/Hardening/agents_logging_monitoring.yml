@@ -1,0 +1,194 @@
+---
+# Wazuh Agent Deployment (Protected Endpoints)
+- name: Deploy Wazuh Agent on Protected Endpoints
+  hosts: protected_endpoints
+  become: yes
+  vars:
+    wazuh_version: "4.7.0"
+    wazuh_manager_ip: "{{ hostvars[groups['wazuh_manager'][0]]['ansible_default_ipv4']['address'] }}"
+    
+  tasks:
+    - name: Update system packages
+      apt:
+        update_cache: yes
+        
+    - name: Add Wazuh GPG key
+      apt_key:
+        url: https://packages.wazuh.com/key/GPG-KEY-WAZUH
+        state: present
+
+    - name: Add Wazuh repository
+      apt_repository:
+        repo: "deb https://packages.wazuh.com/4.x/apt/ stable main"
+        state: present
+
+    - name: Install Wazuh Agent
+      apt:
+        name: "wazuh-agent={{ wazuh_version }}-*"
+        state: present
+
+    - name: Configure Wazuh Agent
+      copy:
+        content: |
+          <ossec_config>
+            <client>
+              <server>
+                <address>{{ wazuh_manager_ip }}</address>
+                <port>1514</port>
+                <protocol>udp</protocol>
+              </server>
+              <config-profile>ubuntu, ubuntu18, ubuntu18.04</config-profile>
+              <notify_time>10</notify_time>
+              <time-reconnect>60</time-reconnect>
+              <auto_restart>yes</auto_restart>
+              <crypto_method>aes</crypto_method>
+            </client>
+
+            <wodle name="cis-cat">
+              <disabled>yes</disabled>
+            </wodle>
+
+            <wodle name="osquery">
+              <disabled>yes</disabled>
+            </wodle>
+
+            <wodle name="syscollector">
+              <disabled>no</disabled>
+              <interval>1h</interval>
+              <scan_on_start>yes</scan_on_start>
+              <hardware>yes</hardware>
+              <os>yes</os>
+              <network>yes</network>
+              <packages>yes</packages>
+              <ports all="no">yes</ports>
+              <processes>yes</processes>
+            </wodle>
+
+            <sca>
+              <enabled>yes</enabled>
+              <scan_on_start>yes</scan_on_start>
+              <interval>12h</interval>
+              <skip_nfs>yes</skip_nfs>
+            </sca>
+
+            <localfile>
+              <log_format>syslog</log_format>
+              <location>/var/log/auth.log</location>
+            </localfile>
+
+            <localfile>
+              <log_format>syslog</log_format>
+              <location>/var/log/syslog</location>
+            </localfile>
+
+            <localfile>
+              <log_format>syslog</log_format>
+              <location>/var/log/dpkg.log</location>
+            </localfile>
+
+            <localfile>
+              <log_format>command</log_format>
+              <command>df -P</command>
+              <frequency>360</frequency>
+            </localfile>
+
+            <localfile>
+              <log_format>full_command</log_format>
+              <command>netstat -tulpn | sed 's/\([[:alnum:]]\+\)\ \+[[:digit:]]\+\ \+[[:digit:]]\+\ \+\(.*\):\([[:digit:]]*\)\ \+\([0-9\.\:\*]*\).\+\ \([[:digit:]]*\/[[:alnum:]\-]*\).*/\1 \2 \3 \4 \5/' | sort -k 4 -g | sed 's/^\(.*\)\ \(.*\)\ \(.*\)\ \(.*\)\ \(.*\)$/\1 \2:\3 \4 \5/'</command>
+              <alias>netstat listening ports</alias>
+              <frequency>360</frequency>
+            </localfile>
+
+            <rootcheck>
+              <disabled>no</disabled>
+              <check_files>yes</check_files>
+              <check_trojans>yes</check_trojans>
+              <check_dev>yes</check_dev>
+              <check_sys>yes</check_sys>
+              <check_pids>yes</check_pids>
+              <check_ports>yes</check_ports>
+              <check_if>yes</check_if>
+            </rootcheck>
+
+            <syscheck>
+              <disabled>no</disabled>
+              <frequency>43200</frequency>
+              <scan_on_start>yes</scan_on_start>
+
+              <directories check_all="yes">/etc,/usr/bin,/usr/sbin</directories>
+              <directories check_all="yes">/bin,/sbin</directories>
+
+              <ignore>/etc/mtab</ignore>
+              <ignore>/etc/hosts.deny</ignore>
+              <ignore>/etc/mail/statistics</ignore>
+              <ignore>/etc/random-seed</ignore>
+              <ignore>/etc/adjtime</ignore>
+              <ignore>/etc/httpd/logs</ignore>
+              <ignore>/etc/utmpx</ignore>
+              <ignore>/etc/wtmpx</ignore>
+              <ignore>/etc/cups/certs</ignore>
+              <ignore>/etc/dumpdates</ignore>
+              <ignore>/etc/svc/volatile</ignore>
+            </syscheck>
+
+            <active-response>
+              <disabled>no</disabled>
+            </active-response>
+          </ossec_config>
+        dest: /var/ossec/etc/ossec.conf
+        backup: yes
+      notify: restart wazuh-agent
+
+    - name: Enable and start Wazuh Agent
+      systemd:
+        name: wazuh-agent
+        enabled: yes
+        state: started
+
+    - name: Allow outbound connection to Wazuh Manager
+      ufw:
+        rule: allow
+        direction: out
+        to_port: "1514"
+        to_ip: "{{ wazuh_manager_ip }}"
+
+    - name: Display agent status
+      debug:
+        msg: |
+          Wazuh Agent installed successfully!
+          Manager: {{ wazuh_manager_ip }}
+          
+          Agent will automatically register with the manager.
+          Check agent status: sudo /var/ossec/bin/agent_control -l
+
+  handlers:
+    - name: restart wazuh-agent
+      systemd:
+        name: wazuh-agent
+        state: restarted
+
+  
+    - name: restart elasticsearch
+      systemd:
+        name: elasticsearch
+        state: restarted
+  
+    - name: restart kibana
+      systemd:
+        name: kibana
+        state: restarted
+
+    - name: restart logstash
+      systemd:
+        name: logstash
+        state: restarted
+
+    - name: restart wazuh-manager
+      systemd:
+        name: wazuh-manager
+        state: restarted
+
+    - name: restart filebeat
+      systemd:
+        name: filebeat
+        state: restarted

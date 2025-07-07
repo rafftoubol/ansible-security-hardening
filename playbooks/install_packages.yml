@@ -1,0 +1,66 @@
+---
+- name: install packages
+  hosts: new
+  become: yes
+  vars_files:
+    - ../secrets.yml
+  handlers:
+    - import_tasks: ../handlers/handlers.yml
+  vars:
+    ansible_become_pass: "{{ admin_password }}" 
+  tasks:
+    # 1. Ensure APT is unlocked first
+    - name: Remove stale APT lock files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/lib/apt/lists/lock
+        - /var/lib/dpkg/lock
+        - /var/cache/apt/archives/lock
+      register: apt_lock
+      ignore_errors: yes
+
+    # 2. Update package index
+    - name: Stream apt update progress
+      ansible.builtin.shell: |
+       apt-get update | tee /dev/stderr
+      args:
+       executable: /bin/bash
+      register: apt_update
+      changed_when: apt_update.rc == 0
+      retries: 3
+      delay: 10
+
+    # 3. Install required packages
+    - name: Install packages
+      ansible.builtin.apt:
+        name: 
+          - libpam-pwquality
+          - fail2ban
+          - ufw
+          - curl
+          - wget
+          - jq
+          - neovim
+          - bat
+        state: present
+      register: apt_install
+      retries: 3
+      delay: 10
+      until: apt_install is succeeded
+
+    - name: Create formatted summary
+      ansible.builtin.set_fact:
+        execution_summary:
+          APT Cache Flush: "{{ apt_lock }}"
+          APT Update: "{{ apt_update }}"
+          APT Install: "{{ apt_install }}"
+      delegate_to: localhost
+      run_once: true
+
+    - name: Display all registered results
+      ansible.builtin.debug:
+        var: execution_summary
+      delegate_to: localhost
+      run_once: true

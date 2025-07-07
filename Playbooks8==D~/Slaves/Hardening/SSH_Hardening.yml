@@ -1,0 +1,145 @@
+---
+- name: SSH Security Hardening Playbook
+  hosts: all
+  become: yes
+  vars:
+    new_ansible_user: "ansible_admin"      # New admin user to create
+    new_ansible_password: "penis123" # Encrypted
+    notification_email: "raphael.toubol@mif.stud.vu.lt"
+    ssh_port: 22
+#  # No credentials stored in the playbook
+#  vars_prompt:
+#    - name: ansible_ssh_user
+#      prompt: "Enter initial SSH username"
+#      private: no
+#
+#    - name: ansible_ssh_pass
+#      prompt: "Enter initial SSH password"
+#      private: yes
+#      confirm: yes
+
+  tasks:
+    - name: Install security packages
+      ansible.builtin.package:
+        name:
+          - fail2ban
+          - auditd
+          - aide
+          - ufw
+        state: present
+    # 1. Create dedicated Ansible user (with vaulted password)
+    - name: Create ansible admin user
+      ansible.builtin.user:
+        name: "{{ new_ansible_user }}"
+        password: "{{ new_ansible_password | password_hash('sha512') }}"
+        groups: "sudo"
+        shell: /bin/bash
+        create_home: yes
+      #no_log: true  # Don't expose password in logs
+
+    # [Rest of the tasks remain the same as previous playbook...]
+    # Include all other tasks from the hardening playbook
+
+    # 2. Set up SSH directory structure
+    - name: Create .ssh directory for new user
+      ansible.builtin.file:
+        path: "/home/{{ new_ansible_user }}/.ssh"
+        state: directory
+        mode: '0700'
+        owner: "{{ new_ansible_user }}"
+        group: "{{ new_ansible_user }}"
+
+    # 3. Deploy your public key
+    - name: Deploy SSH public key
+      ansible.builtin.lineinfile:
+       path: "/home/{{ new_ansible_user }}/.ssh/authorized_keys"
+       create: yes
+       line: "{{ lookup('file', 'files/id_rsa4096.pub') }}"
+       state: present
+       mode: '0600'
+       owner: "{{ new_ansible_user }}"
+       group: "{{ new_ansible_user }}"
+    - name: Read authorized_keys content
+      ansible.builtin.command: cat "/home/{{ new_ansible_user }}/.ssh/authorized_keys"
+      register: authorized_keys_content
+      changed_when: false
+
+    # 4. Harden SSHD configuration
+    - name: Configure SSH daemon
+      ansible.builtin.template:
+        src: Templates/sshd_config.j2
+        dest: /etc/ssh/sshd_config
+        owner: root
+        group: root
+        mode: '0600'
+      notify: Restart SSH
+
+    # 5. Remove root SSH access
+    - name: Remove root's authorized_keys
+      ansible.builtin.file:
+        path: /root/.ssh/authorized_keys
+        state: absent
+
+
+    - name: Configure fail2ban for SSH
+      ansible.builtin.copy:
+        src: files/jail.local
+        dest: /etc/fail2ban/jail.local
+      notify: Restart fail2ban
+
+    - name: Ensure mailutils is installed
+      ansible.builtin.package:
+        name: mailutils
+        state: present
+      become: yes
+      when: ansible_os_family == "Debian"
+
+    - name: Reload systemd and restart service
+      ansible.builtin.systemd:
+        name: ssh
+        state: restarted
+        daemon_reload: yes
+
+    - name: Create SSH login monitoring script
+      ansible.builtin.copy:
+        dest: /usr/local/bin/ssh_login_monitor.sh
+        mode: '0755'
+        content: |
+          #!/bin/bash
+
+          # Determine the correct auth log file
+          if [ -f "/var/log/auth.log" ]; then
+            AUTH_LOG="/var/log/auth.log"
+          elif [ -f "/var/log/secure" ]; then
+            AUTH_LOG="/var/log/secure"
+          else
+            echo "Cannot find auth log file" | mail -s "SSH Monitor Error on $(hostname)" {{ notification_email }}
+            exit 1
+          fi
+
+          # Check for successful SSH logins in the last 5 minutes
+          LOGINS=$(grep "$(date -d '5 minutes ago' '+%b %d %H:%M')" $AUTH_LOG | grep "sshd.*Accepted")
+
+          # Only send email if logins are found
+          if [ ! -z "$LOGINS" ]; then
+            echo -e "SSH logins to $(hostname) in the last 5 minutes:\n\n$LOGINS" | mail -s "SSH Login Alert for $(hostname)" {{ notification_email }}
+          fi
+
+    - name: Configure SSH login alerts cron job
+      ansible.builtin.cron:
+        name: "SSH login monitoring"
+        minute: "*/5"
+        job: "/usr/local/bin/ssh_login_monitor.sh"
+
+  handlers:
+    - name: Restart SSH
+      ansible.builtin.service:
+        name: ssh
+        state: restarted
+        enabled: yes
+
+    - name: Restart fail2ban
+      ansible.builtin.service:
+        name: fail2ban
+        state: restarted
+        enabled: yes

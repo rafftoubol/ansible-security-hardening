@@ -12,7 +12,7 @@
     ansible_user_group: ansible
     # Generate this beforehand with: ssh-keygen -t ed25519 -C "ansible@control-node"
     # Then copy the content of the public key (~/.ssh/id_ed25519.pub)
-    ansible_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyReplaceMeWithYourActualPublicKey ansible@control-node"
+    ansible_public_key: ""
     # Sudoers file path based on OS type
     sudoers_file: "{% if ansible_os_family == 'Debian' %}/etc/sudoers.d/ansible{% else %}/etc/sudoers.d/ansible{% endif %}"
     

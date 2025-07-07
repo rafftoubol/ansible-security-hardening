@@ -1,0 +1,111 @@
+---
+- name: Configure SSH login alerts (successful and failed)
+  hosts: all
+  become: yes
+  vars:
+    admin_email: "raphael.toubol@gmail.com"  # Replace with your email
+    ssh_port: 22                   # Default SSH port (adjust if needed)
+    fail2ban_max_retries: 3        # Ban after 3 failed attempts
+    fail2ban_bantime: "1h"         # Ban duration
+
+  tasks:
+    # Install required packages
+    - name: Install fail2ban and mailutils
+      ansible.builtin.apt:
+        name:
+          - fail2ban
+          - mailutils
+        state: present
+      when: ansible_os_family == 'Debian'
+
+    # Configure fail2ban for FAILED attempts (triggers email on ban)
+    - name: Configure fail2ban jail.local
+      ansible.builtin.copy:
+        dest: /etc/fail2ban/jail.local
+        content: |
+          [sshd]
+          enabled = true
+          port = {{ ssh_port }}
+          filter = sshd
+          logpath = /var/log/auth.log
+          maxretry = {{ fail2ban_max_retries }}
+          bantime = {{ fail2ban_bantime }}
+          action = %(action_mwl)s  # Email with logs on ban
+          destemail = {{ admin_email }}
+          sender = fail2ban@{{ ansible_hostname }}
+        owner: root
+        group: root
+        mode: 0644
+      notify: Restart fail2ban
+
+    # Script for SUCCESSFUL login alerts (runs on user login)
+    - name: Deploy successful login alert script
+      ansible.builtin.copy:
+        dest: /usr/local/bin/ssh-login-alert.sh
+        mode: 0755
+        content: |
+          #!/bin/bash
+          # Alert on successful SSH logins
+          LOGIN_TIME=$(date +"%Y-%m-%d %H:%M:%S")
+          IP=$(echo $SSH_CONNECTION | awk '{print $1}')
+          echo -e "Successful SSH login:\nHost: $(hostname)\nUser: $USER\nIP: $IP\nTime: $LOGIN_TIME" \
+            | mail -s "SSH Login Alert (SUCCESS) on $(hostname)" {{ admin_email }}
+
+    # Script for FAILED login alerts (monitors auth.log in real-time)
+    - name: Deploy failed login monitor script
+      ansible.builtin.copy:
+        dest: /usr/local/bin/ssh-failed-login-alert.sh
+        mode: 0755
+        content: |
+          #!/bin/bash
+          # Monitor auth.log for failed SSH attempts
+          tail -n 0 -f /var/log/auth.log | grep --line-buffered "sshd.*Failed" | while read line; do
+            IP=$(echo "$line" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}')
+            echo -e "Failed SSH login attempt:\n$line\nHost: $(hostname)" \
+              | mail -s "SSH Login Alert (FAILED) on $(hostname)" {{ admin_email }}
+          done
+
+    # Add scripts to run on startup (successful) and as a service (failed)
+    - name: Add successful login alert to /etc/profile.d (runs on login)
+      ansible.builtin.copy:
+        dest: /etc/profile.d/ssh-login-alert.sh
+        content: |
+          #!/bin/bash
+          /usr/local/bin/ssh-login-alert.sh
+        mode: 0755
+
+    - name: Create systemd service for failed login monitor
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/ssh-failed-login-alert.service
+        content: |
+          [Unit]
+          Description=SSH Failed Login Alert Service
+          After=network.target
+
+          [Service]
+          ExecStart=/usr/local/bin/ssh-failed-login-alert.sh
+          Restart=always
+          User=root
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: 0644
+
+    - name: Enable and start failed login alert service
+      ansible.builtin.systemd:
+        name: ssh-failed-login-alert
+        enabled: yes
+        state: started
+
+    # Ensure fail2ban is running
+    - name: Enable fail2ban
+      ansible.builtin.service:
+        name: fail2ban
+        state: started
+        enabled: yes
+
+  handlers:
+    - name: Restart fail2ban
+      ansible.builtin.service:
+        name: fail2ban
+        state: restarted

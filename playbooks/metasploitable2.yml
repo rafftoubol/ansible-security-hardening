@@ -1,0 +1,120 @@
+---
+- name: Patch Known Metasploitable Vulnerabilities
+  hosts: new
+  become: yes
+  vars_files:
+    - ../secrets.yml
+  handlers:
+    - import_tasks: ../handlers/handlers.yml
+  vars:
+    ansible_become_pass: "{{ admin_password }}" 
+    tomcat_ip: "127.0.0.1"
+    tomcat_secret: "{{ tomcat_secret }}"
+    vnc_password: "{{ vnc_password }}"
+
+  tasks: 
+    # Task 4: Kill schedulers
+    - name: Stop and disable cron
+      ansible.builtin.service:
+        name: cron
+        state: stopped
+        enabled: no
+
+    - name: Remove at and batch jobs
+      ansible.builtin.command: atrm $(atq | awk '{print $1}')
+      ignore_errors: yes
+      changed_when: false
+
+    # Task 5: Reset /etc/exports
+    - name: Reset /etc/exports to default
+      ansible.builtin.copy:
+        src: ../templates/default_exports
+        dest: /etc/exports
+        owner: root
+        group: root
+        mode: '0644'
+      ignore_errors: yes
+      notify: Restart NFS
+
+    # Task 6: Set VNC password
+    - name: Set VNC password
+      ansible.builtin.command: "echo '{{ vnc_password }}' | vncpasswd -f > /etc/vnc/passwd"
+      args:
+        creates: /etc/vnc/passwd
+
+    # Task 7: Disable insecure services
+    - name: Disable telnet, rexec, rlogin
+      ansible.builtin.lineinfile:
+        path: /etc/inetd.conf
+        regexp: "^{{ item }}"
+        state: absent
+      with_items:
+        - "telnet"
+        - "shell"
+        - "login"
+      ignore_errors: yes
+      notify: Restart inetd
+
+    - name: Remove root shell spawn
+      ansible.builtin.lineinfile:
+        path: /etc/inetd.conf
+        regexp: "^ingreslock stream tcp nowait root /bin/bash bash -i"
+        state: absent
+      ignore_errors: yes
+      notify: Restart inetd
+
+    # Task 8: Uninstall IRCD
+    - name: Uninstall IRCD
+      ansible.builtin.apt:
+        name: ircd-irc2
+        state: absent
+        purge: yes
+      ignore_errors: yes
+
+    # Task 9: Secure FTP
+    - name: Update vsftpd config
+      ansible.builtin.lineinfile:
+        path: /etc/vsftpd.conf
+        regexp: "^anonymous_enable="
+        line: "anonymous_enable=NO"
+      ignore_errors: yes
+      notify: Restart vsftpd
+
+    # Task 10: Secure Samba
+    - name: Comment out vulnerable samba config
+      ansible.builtin.lineinfile:
+        path: /etc/samba/smb.conf
+        regexp: "^username map script"
+        line: "#username map script = /etc/samba/scripts/mapusers.sh"
+      ignore_errors: yes
+      notify: Restart samba
+
+    # Task 11: Update Apache/Tomcat
+    - name: Secure Tomcat AJP connector
+      ansible.builtin.lineinfile:
+        path: /etc/tomcat5.5/server.xml
+        regexp: '<Connector port="8009" protocol="AJP/1.3"'
+        line: '<Connector port="8009" protocol="AJP/1.3" redirectPort="8443" address="{{ tomcat_ip }}" secret="{{ tomcat_secret }}"/>'
+      ignore_errors: yes
+      notify: Restart tomcat
+
+    # Task 12: Patch DistCCd
+    - name: Update distcc
+      ansible.builtin.apt:
+        name: distcc
+        state: latest
+        update_cache: yes
+      ignore_errors: yes
+      notify: Restart distcc
+
+    # Task 14: Stop netcat on port 1524
+    - name: Find and kill netcat on port 1524
+      ansible.builtin.shell: |
+        kill $(lsof -t -i :1524)
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Ensure netcat doesn't restart
+      ansible.builtin.cron:
+        name: "netcat listener"
+        state: absent

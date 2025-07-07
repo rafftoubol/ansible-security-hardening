@@ -1,0 +1,398 @@
+---
+- name: Install and Configure Endpoint Security Tools
+  hosts: new
+  become: yes
+  vars:
+    aide_config_path: "/etc/aide/aide.conf"
+    aide_db_path: "/var/lib/aide/aide.db"
+    aide_db_new_path: "/var/lib/aide/aide.db.new"
+    ansible_become_pass: "changeme"
+  handlers:
+    - import_tasks: ../handlers/handlers.yml
+  vars_files: 
+    - ../secrets.yml   
+  tasks:
+    # Update package cache
+    - name: Update package cache (Debian/Ubuntu)
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      when: ansible_os_family == "Debian"
+
+    - name: Update package cache (RHEL/CentOS)
+      yum:
+        update_cache: yes
+      when: ansible_os_family == "RedHat"
+
+    # Install AIDE
+    - name: Install AIDE (Debian/Ubuntu)
+      apt:
+        name: aide
+        state: present
+      when: ansible_os_family == "Debian"
+
+    - name: Install AIDE (RHEL/CentOS)
+      yum:
+        name: aide
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    # Install additional security tools
+    - name: Install security packages (Debian/Ubuntu)
+      apt:
+        name:
+          - rkhunter          # Rootkit hunter
+          - chkrootkit        # Rootkit checker
+          - lynis             # Security auditing tool
+          - fail2ban          # Intrusion prevention
+          - auditd            # Linux audit daemon
+          - psad              # Port scan attack detector
+          - logwatch          # Log analysis tool
+          - tripwire          # File integrity monitoring (alternative to AIDE)
+          - clamav            # Antivirus
+          - clamav-daemon
+          - unhide            # Hidden process detector
+          - debsums           # Debian package integrity checker
+        state: present
+      when: ansible_os_family == "Debian"
+
+    - name: Install security packages (RHEL/CentOS)
+      yum:
+        name:
+          - rkhunter
+          - lynis
+          - fail2ban
+          - audit
+          - psad
+          - logwatch
+          - clamav
+          - clamav-update
+          - unhide
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    # Configure AIDE - Create directory first
+    - name: Create AIDE configuration directory
+      file:
+        path: /etc/aide
+        state: directory
+        mode: '0755'
+
+    - name: Create AIDE database directory
+      file:
+        path: /var/lib/aide
+        state: directory
+        mode: '0755'
+
+    - name: Create AIDE log directory
+      file:
+        path: /var/log/aide
+        state: directory
+        mode: '0755'
+
+    - name: Backup original AIDE configuration
+      copy:
+        src: "{{ aide_config_path }}"
+        dest: "{{ aide_config_path }}.backup"
+        remote_src: yes
+        backup: yes
+      ignore_errors: yes
+
+    - name: Create AIDE configuration file
+      copy:
+        dest: "{{ aide_config_path }}"
+        mode: '0644'
+        content: |
+          # Custom AIDE configuration for enhanced security monitoring
+          
+          # Database and report locations
+          database=file:{{ aide_db_path }}
+          database_out=file:{{ aide_db_new_path }}
+          gzip_dbout=yes
+          
+          # Report settings
+          report_url=file:/var/log/aide/aide.log
+          report_url=stdout
+          
+          # Custom rules
+          ALLXTRAHASHES = sha1+rmd160+sha256+sha512+tiger
+          EVERYTHING = R+ALLXTRAHASHES
+          NORMAL = R+rmd160+sha256
+          DIR = p+i+n+u+g+s+m+c+md5
+          PERMS = p+i+u+g+s
+          LOG = >
+          LSPP = R+sha256
+          DATAONLY = p+n+u+g+s+acl+selinux+xattrs+md5+sha256+rmd160+tiger
+          
+          # Directory monitoring rules
+          /boot    NORMAL
+          /bin     NORMAL
+          /sbin    NORMAL
+          /lib     NORMAL
+          /lib64   NORMAL
+          /opt     NORMAL
+          /usr     NORMAL
+          /root    NORMAL
+          !/root/.bash_history
+          !/root/.viminfo
+          /etc     PERMS
+          !/etc/mtab
+          !/etc/.*~
+          !/etc/exports
+          !/etc/fstab
+          !/etc/passwd.backup
+          !/etc/shadow.backup
+          !/etc/gshadow.backup
+          
+          # Logs (check for additions)
+          /var/log LOG
+          
+          # Critical system files
+          /etc/passwd NORMAL
+          /etc/shadow NORMAL
+          /etc/group NORMAL
+          /etc/gshadow NORMAL
+          /etc/sudoers NORMAL
+          /etc/hosts NORMAL
+          /etc/ssh/sshd_config NORMAL
+          
+          # Ignore temporary and variable files
+          !/var/log/.*
+          !/var/spool/.*
+          !/var/cache/.*
+          !/var/tmp/.*
+          !/tmp/.*
+          !/proc/.*
+          !/sys/.*
+          !/dev/.*
+          !/run/.*
+
+    # Initialize AIDE database
+    - name: Check if AIDE database exists
+      stat:
+        path: "{{ aide_db_path }}"
+      register: aide_db_exists
+
+    - name: Initialize AIDE database
+      command: aide --init --config={{ aide_config_path }}
+      when: not aide_db_exists.stat.exists
+      register: aide_init_result
+      failed_when: aide_init_result.rc != 0
+
+    - name: Move new AIDE database to active location
+      command: mv {{ aide_db_new_path }} {{ aide_db_path }}
+      when: not aide_db_exists.stat.exists and aide_init_result is succeeded
+
+    # Set up AIDE cron job
+    - name: Create AIDE check script
+      copy:
+        dest: /usr/local/bin/aide-check.sh
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          # AIDE integrity check script
+          
+          LOGFILE="/var/log/aide/aide-check.log"
+          MAILTO="root"
+          CONFIG_FILE="{{ aide_config_path }}"
+          
+          # Create log directory if it doesn't exist
+          mkdir -p /var/log/aide
+          
+          # Run AIDE check
+          echo "$(date): Starting AIDE check" >> $LOGFILE
+          
+          if /usr/bin/aide --check --config=$CONFIG_FILE > /tmp/aide-check.tmp 2>&1; then
+              echo "$(date): AIDE check completed successfully" >> $LOGFILE
+          else
+              echo "$(date): AIDE check found changes!" >> $LOGFILE
+              cat /tmp/aide-check.tmp >> $LOGFILE
+              
+              # Email the results if mail is configured
+              if command -v mail >/dev/null 2>&1; then
+                  mail -s "AIDE Alert: File integrity changes detected on $(hostname)" $MAILTO < /tmp/aide-check.tmp
+              fi
+          fi
+          
+          rm -f /tmp/aide-check.tmp
+
+    - name: Set up daily AIDE cron job
+      cron:
+        name: "Daily AIDE integrity check"
+        minute: "30"
+        hour: "3"
+        job: "/usr/local/bin/aide-check.sh"
+        user: root
+
+    # Configure Fail2Ban
+    - name: Start and enable fail2ban
+      systemd:
+        name: fail2ban
+        state: started
+        enabled: yes
+
+    - name: Configure fail2ban for SSH
+      copy:
+        dest: /etc/fail2ban/jail.local
+        content: |
+          [DEFAULT]
+          bantime = 3600
+          findtime = 600
+          maxretry = 3
+          
+          [sshd]
+          enabled = true
+          port = ssh
+          logpath = /var/log/auth.log
+          maxretry = 3
+          bantime = 3600
+      notify: restart fail2ban
+
+    # Configure auditd
+    - name: Start and enable auditd (Debian/Ubuntu)
+      systemd:
+        name: auditd
+        state: started
+        enabled: yes
+      when: ansible_os_family == "Debian"
+
+    - name: Start and enable auditd (RHEL/CentOS)
+      systemd:
+        name: auditd
+        state: started
+        enabled: yes
+      when: ansible_os_family == "RedHat"
+
+    - name: Configure audit rules for security monitoring
+      copy:
+        dest: /etc/audit/rules.d/security.rules
+        content: |
+          # Security monitoring audit rules
+          
+          # Monitor authentication events
+          -w /etc/passwd -p wa -k identity
+          -w /etc/group -p wa -k identity
+          -w /etc/shadow -p wa -k identity
+          -w /etc/gshadow -p wa -k identity
+          -w /etc/sudoers -p wa -k identity
+          
+          # Monitor login/logout events
+          -w /var/log/faillog -p wa -k logins
+          -w /var/log/lastlog -p wa -k logins
+          -w /var/log/tallylog -p wa -k logins
+          
+          # Monitor network configuration
+          -w /etc/hosts -p wa -k network
+          -w /etc/network/ -p wa -k network
+          
+          # Monitor SSH configuration
+          -w /etc/ssh/sshd_config -p wa -k sshd
+          
+          # Monitor privilege escalation
+          -a always,exit -F arch=b64 -S setuid -S setgid -S setreuid -S setregid -k privilege_esc
+          -a always,exit -F arch=b32 -S setuid -S setgid -S setreuid -S setregid -k privilege_esc
+          
+          # Monitor file deletions
+          -a always,exit -F arch=b64 -S unlink -S unlinkat -S rename -S renameat -k delete
+          -a always,exit -F arch=b32 -S unlink -S unlinkat -S rename -S renameat -k delete
+      notify: restart auditd
+
+    # Configure ClamAV
+    - name: Update ClamAV virus definitions
+      command: freshclam
+      ignore_errors: yes
+
+    - name: Create ClamAV scan script
+      copy:
+        dest: /usr/local/bin/clamscan-daily.sh
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          # Daily ClamAV scan script
+          
+          LOGFILE="/var/log/clamav/daily-scan.log"
+          SCAN_DIR="/"
+          EXCLUDE_DIRS="--exclude-dir=/proc --exclude-dir=/sys --exclude-dir=/dev --exclude-dir=/tmp"
+          
+          mkdir -p /var/log/clamav
+          
+          echo "$(date): Starting daily virus scan" >> $LOGFILE
+          clamscan -r -i $EXCLUDE_DIRS $SCAN_DIR >> $LOGFILE 2>&1
+          echo "$(date): Daily virus scan completed" >> $LOGFILE
+
+    - name: Set up daily ClamAV scan cron job
+      cron:
+        name: "Daily ClamAV virus scan"
+        minute: "0"
+        hour: "2"
+        job: "/usr/local/bin/clamscan-daily.sh"
+        user: root
+
+    # Configure RKHunter
+    - name: Fix RKHunter WEB_CMD configuration
+      lineinfile:
+        path: /etc/rkhunter.conf
+        regexp: '^#?WEB_CMD='
+        line: 'WEB_CMD=""'
+        backup: yes
+
+    - name: Configure RKHunter mail settings
+      lineinfile:
+        path: /etc/rkhunter.conf
+        regexp: '^#?MAIL-ON-WARNING='
+        line: 'MAIL-ON-WARNING=root'
+        backup: yes
+
+    - name: Configure RKHunter to allow package manager updates
+      lineinfile:
+        path: /etc/rkhunter.conf
+        regexp: '^#?PKGMGR='
+        line: 'PKGMGR=DPKG'
+        backup: yes
+      when: ansible_os_family == "Debian"
+
+    - name: Configure RKHunter to allow package manager updates (RHEL)
+      lineinfile:
+        path: /etc/rkhunter.conf
+        regexp: '^#?PKGMGR='
+        line: 'PKGMGR=RPM'
+        backup: yes
+      when: ansible_os_family == "RedHat"
+
+    - name: Update RKHunter database
+      command: rkhunter --update
+      ignore_errors: yes
+
+    - name: Set up weekly RKHunter scan
+      cron:
+        name: "Weekly RKHunter scan"
+        minute: "0"
+        hour: "4"
+        weekday: "0"
+        job: "/usr/bin/rkhunter --cronjob --update --quiet"
+        user: root
+
+    # Configure Lynis
+    - name: Set up monthly Lynis audit
+      cron:
+        name: "Monthly Lynis security audit"
+        minute: "0"
+        hour: "5"
+        day: "1"
+        job: "/usr/bin/lynis audit system --cronjob > /var/log/lynis-$(date +\\%Y\\%m\\%d).log"
+        user: root
+
+    # Create log rotation for security logs
+    - name: Configure logrotate for AIDE logs
+      copy:
+        dest: /etc/logrotate.d/aide
+        content: |
+          /var/log/aide/*.log {
+              weekly
+              rotate 12
+              compress
+              delaycompress
+              missingok
+              notifempty
+              create 640 root root
+          }

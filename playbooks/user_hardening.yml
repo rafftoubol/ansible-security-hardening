@@ -1,0 +1,75 @@
+---
+- name: Secure system users and permissions
+  hosts: new
+  become: yes
+  vars_files:
+    - ../secrets.yml
+  handlers:
+    - import_tasks: ../handlers/handlers.yml
+  vars:
+    authorized_admin: "ansible_admin"
+    ansible_become_pass: "{{ admin_password }}" 
+    new_root_password: "{{ root_password }}"
+    # Password policy (minimum length 12, diff chars from old 5, max 2 repeating char, verify its not in a known list) 
+    password_policy:
+      minlen: 12
+      difok: 5
+      maxrepeat: 2
+      dictcheck: 1
+      enforce_for_root: true
+
+  tasks:
+    - name: Change root password
+      ansible.builtin.user:
+        name: root
+        password: "{{ new_root_password | password_hash('sha512') }}"
+
+    - name: Change my users password
+      ansible.builtin.user:
+        name: rato1426
+        password: "{{ rato1426_password | password_hash('sha512') }}"
+
+    # 1. Create dedicated sudoers file for ansible_admin
+    - name: Allow ONLY ansible_admin to sudo
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/ansible_admin
+        content: |
+          # ansible_admin gets full sudo
+          ansible_admin ALL=(ALL:ALL) ALL
+        mode: 0440
+        validate: /usr/sbin/visudo -cf %s
+
+    #  Disable sudo group access
+    - name: Comment out sudo group in main sudoers
+      ansible.builtin.replace:
+        path: /etc/sudoers
+        regexp: '^%sudo\s+ALL=\(ALL:ALL\)\s+ALL'
+        replace: '# %sudo ALL=(ALL:ALL) ALL  # Disabled by Ansible'
+        validate: /usr/sbin/visudo -cf %s
+
+    - name: Configure password complexity
+      ansible.builtin.lineinfile:
+        path: /etc/security/pwquality.conf
+        regexp: "^{{ item.key }}"
+        line: "{{ item.key }} = {{ item.value }}"
+        create: true
+      loop: "{{ password_policy | dict2items }}"
+
+    #  Set password aging policies
+    - name: Configure password aging
+      ansible.builtin.lineinfile:
+        path: /etc/login.defs
+        regexp: "^{{ item.key }}"
+        line: "{{ item.key }} {{ item.value }}"
+      loop:
+        - { key: "PASS_MAX_DAYS", value: "90" }
+        - { key: "PASS_WARN_AGE", value: "14" }
+
+    #  Secure sudoers file
+    - name: Restrict sudo access to authorized_admin
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/ansible_admin
+        content: |
+          # Allow only {{ authorized_admin }} full sudo access
+          {{ authorized_admin }} ALL=(ALL:ALL) ALL
+        validate: /usr/sbin/visudo -cf %s

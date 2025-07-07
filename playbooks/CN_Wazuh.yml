@@ -1,0 +1,495 @@
+---
+# Wazuh Manager + Wazuh Indexer + Wazuh Dashboard Deployment on Arch Linux (Control Node)
+- name: Configure Wazuh Manager, Indexer and Dashboard on Arch Linux
+  hosts: localhost
+  connection: local
+  gather_facts: yes
+  vars:
+    wazuh_version: "4.7.0"
+    
+  vars_files:
+    - ../secrets.yml
+  handlers:
+    - import_tasks: ../handlers/handlers.yml
+  tasks:
+    # System preparation for Arch Linux
+    - name: Update system packages
+      pacman:
+        update_cache: yes
+        upgrade: yes
+      become: yes
+        
+    - name: Install required packages
+      pacman:
+        name:
+          - curl
+          - wget
+          - gnupg
+          - jdk11-openjdk
+          - python-pip
+          - git
+          - base-devel
+        state: present
+      become: yes
+
+    - name: Set Java 21 as system default
+      shell: archlinux-java set java-21-openjdk
+      become: yes
+
+    - name: Set JAVA_HOME environment variable
+      lineinfile:
+        path: /etc/environment
+        line: 'JAVA_HOME="/usr/lib/jvm/java-21-openjdk"'
+        create: yes
+      become: yes
+
+    - name: Source environment variables
+      shell: source /etc/environment
+      become: yes
+
+    # Wazuh Indexer Configuration
+    - name: Ensure wazuh-indexer user exists
+      user:
+       name: wazuh-indexer
+       system: yes
+       shell: /usr/bin/nologin
+       home: /var/lib/wazuh-indexer
+      become: yes
+
+    - name: Create Wazuh Indexer directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: wazuh-indexer
+        group: wazuh-indexer
+        mode: '0755'
+      loop:
+        - /var/lib/wazuh-indexer
+        - /var/log/wazuh-indexer
+        - /etc/wazuh-indexer
+        - /etc/wazuh-indexer/jvm.options.d
+      become: yes
+
+    - name: Create Wazuh Indexer Java configuration
+      lineinfile:
+        path: /etc/wazuh-indexer/jvm.options.d/java21.options
+        line: "{{ item }}"
+        create: yes
+      loop:
+       - "# Use Java 21 for Wazuh Indexer"
+       - "-Djava.home=/usr/lib/jvm/java-21-openjdk"
+      become: yes
+
+    - name: Configure Wazuh Indexer
+      copy:
+        content: |
+          # Basic cluster configuration
+          cluster.name: wazuh-cluster
+          node.name: wazuh-indexer-node
+          
+          # Paths
+          path.data: /var/lib/wazuh-indexer
+          path.logs: /var/log/wazuh-indexer
+          
+          # Network settings
+          network.host: 127.0.0.1
+          http.port: 9201
+          transport.port: 9301
+          
+          # Discovery settings for single node
+          discovery.type: single-node
+          
+          # Security settings
+          plugins.security.disabled: true
+          
+          # Performance settings
+          bootstrap.memory_lock: false
+          
+          # Compatibility
+          compatibility.override_main_response_version: true
+          
+          # Index settings
+          action.auto_create_index: true
+          
+          # Logging
+          logger.level: INFO
+        dest: /etc/wazuh-indexer/opensearch.yml
+        owner: wazuh-indexer
+        group: wazuh-indexer
+        backup: yes
+      become: yes
+      notify: restart wazuh-indexer
+
+    - name: Set Wazuh Indexer heap size (min)
+      lineinfile:
+        path: /etc/wazuh-indexer/jvm.options.d/heap.options
+        line: '-Xms1g'
+        create: yes
+      become: yes
+
+    - name: Set Wazuh Indexer heap size (max)
+      lineinfile:
+        path: /etc/wazuh-indexer/jvm.options.d/heap.options
+        line: '-Xmx1g'
+        create: yes
+      become: yes
+
+    - name: Set correct ownership for Wazuh Indexer
+      file:
+        path: "{{ item }}"
+        owner: wazuh-indexer
+        group: wazuh-indexer
+        recurse: yes
+      loop:
+        - /var/lib/wazuh-indexer
+        - /var/log/wazuh-indexer
+        - /etc/wazuh-indexer
+      become: yes
+
+    - name: Create Wazuh Indexer systemd override directory
+      file:
+        path: /etc/systemd/system/wazuh-indexer.service.d
+        state: directory
+      become: yes
+
+    - name: Configure Wazuh Indexer service limits for Arch
+      copy:
+        content: |
+          [Service]
+          LimitNOFILE=65535
+          LimitNPROC=4096
+          LimitMEMLOCK=infinity
+        dest: /etc/systemd/system/wazuh-indexer.service.d/override.conf
+      become: yes
+      notify: restart wazuh-indexer
+
+    - name: Stop Wazuh Indexer if running
+      systemd:
+        name: wazuh-indexer
+        state: stopped
+      become: yes
+      ignore_errors: yes
+
+    - name: Check and clean Wazuh Indexer data directory
+      file:
+        path: /var/lib/wazuh-indexer/nodes
+        state: absent
+      become: yes
+      ignore_errors: yes
+
+    - name: Enable and start Wazuh Indexer
+      systemd:
+        name: wazuh-indexer
+        enabled: yes
+        state: started
+        daemon_reload: yes
+      become: yes
+
+    # Wazuh Dashboard Configuration
+    - name: Ensure wazuh-dashboard user exists
+      user:
+       name: wazuh-dashboard
+       system: yes
+       shell: /usr/bin/nologin
+       home: /var/lib/wazuh-dashboard
+      become: yes
+
+    - name: Create Wazuh Dashboard directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: wazuh-dashboard
+        group: wazuh-dashboard
+        mode: '0755'
+      loop:
+        - /var/lib/wazuh-dashboard
+        - /var/log/wazuh-dashboard
+        - /etc/wazuh-dashboard
+      become: yes
+
+    - name: Configure Wazuh Dashboard
+      copy:
+        content: |
+          server.port: 5601
+          server.host: "0.0.0.0"
+          opensearch.hosts: ["http://localhost:9201"]
+          logging.dest: /var/log/wazuh-dashboard/wazuh-dashboard.log
+          opensearch.ssl.verificationMode: none
+          opensearch.username: ""
+          opensearch.password: ""
+          opensearch.requestHeadersWhitelist: ["authorization", "securitytenant"]
+          server.ssl.enabled: false
+          opensearch.requestTimeout: 60000
+          opensearch.shardTimeout: 30000
+          server.defaultRoute: "/app/wz-home"
+          uiSettings.overrides:
+        dest: /etc/wazuh-dashboard/opensearch_dashboards.yml
+        owner: wazuh-dashboard
+        group: wazuh-dashboard
+        backup: yes
+      become: yes
+      notify: restart wazuh-dashboard
+
+    - name: Set correct ownership for Wazuh Dashboard
+      file:
+        path: "{{ item }}"
+        owner: wazuh-dashboard
+        group: wazuh-dashboard
+        recurse: yes
+      loop:
+        - /var/lib/wazuh-dashboard
+        - /var/log/wazuh-dashboard
+        - /etc/wazuh-dashboard
+      become: yes
+
+    - name: Enable and start Wazuh Dashboard
+      systemd:
+        name: wazuh-dashboard
+        enabled: yes
+        state: started
+      become: yes
+
+    # Wazuh Manager Configuration
+    - name: Ensure wazuh user exists
+      user:
+       name: wazuh
+       system: yes
+       shell: /usr/bin/nologin
+       home: /var/ossec
+      become: yes
+
+    - name: Create Wazuh Manager directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: wazuh
+        group: wazuh
+        mode: '0755'
+      loop:
+        - /var/ossec
+        - /var/ossec/etc
+        - /var/ossec/logs
+        - /var/ossec/queue
+        - /var/ossec/var
+      become: yes
+
+    - name: Configure Wazuh Manager
+      copy:
+        content: |
+          <ossec_config>
+            <global>
+              <email_notification>no</email_notification>
+              <logall>yes</logall>
+              <logall_json>yes</logall_json>
+              <alerts_log>yes</alerts_log>
+            </global>
+
+            <alerts>
+              <log_alert_level>3</log_alert_level>
+              <email_alert_level>12</email_alert_level>
+            </alerts>
+
+            <remote>
+              <connection>secure</connection>
+              <port>1514</port>
+              <protocol>udp</protocol>
+            </remote>
+
+            <localfile>
+              <log_format>syslog</log_format>
+              <location>/var/log/auth.log</location>
+            </localfile>
+
+            <localfile>
+              <log_format>syslog</log_format>
+              <location>/var/log/messages</location>
+            </localfile>
+
+            <localfile>
+              <log_format>syslog</log_format>
+              <location>/var/log/pacman.log</location>
+            </localfile>
+
+            <rootcheck>
+              <disabled>no</disabled>
+              <check_files>yes</check_files>
+              <check_trojans>yes</check_trojans>
+              <check_dev>yes</check_dev>
+              <check_sys>yes</check_sys>
+              <check_pids>yes</check_pids>
+              <check_ports>yes</check_ports>
+              <check_if>yes</check_if>
+            </rootcheck>
+
+            <syscheck>
+              <disabled>no</disabled>
+              <frequency>79201</frequency>
+              <scan_on_start>yes</scan_on_start>
+              <directories check_all="yes">/etc,/usr/bin,/usr/sbin</directories>
+              <directories check_all="yes">/bin,/sbin,/usr/local/bin</directories>
+              <ignore>/etc/mtab</ignore>
+              <ignore>/etc/random-seed</ignore>
+              <ignore>/etc/adjtime</ignore>
+              <ignore>/etc/machine-id</ignore>
+              <ignore>/etc/pacman.d/gnupg</ignore>
+            </syscheck>
+
+            <command>
+              <name>host-deny</name>
+              <executable>host-deny</executable>
+              <expect>srcip</expect>
+              <timeout_allowed>yes</timeout_allowed>
+            </command>
+
+            <active-response>
+              <disabled>no</disabled>
+              <command>host-deny</command>
+              <location>local</location>
+              <level>6</level>
+              <timeout>600</timeout>
+            </active-response>
+
+            <integration>
+              <name>indexer</name>
+              <hook_url>http://localhost:9201</hook_url>
+              <level>3</level>
+              <alert_format>json</alert_format>
+            </integration>
+          </ossec_config>
+        dest: /var/ossec/etc/ossec.conf
+        owner: wazuh
+        group: wazuh
+        backup: yes
+      become: yes
+      notify: restart wazuh-manager
+
+    - name: Set correct ownership for Wazuh Manager
+      file:
+        path: /var/ossec
+        owner: wazuh
+        group: wazuh
+        recurse: yes
+      become: yes
+
+    - name: Enable and start Wazuh Manager
+      systemd:
+        name: wazuh-manager
+        enabled: yes
+        state: started
+      become: yes
+
+    # Wazuh Filebeat Configuration (for shipping data to Wazuh Indexer)
+    - name: Configure Filebeat for Wazuh Indexer
+      copy:
+        content: |
+          filebeat.inputs:
+          - type: log
+            enabled: true
+            paths:
+              - /var/ossec/logs/alerts/alerts.json
+            fields:
+              index: wazuh-alerts
+              type: wazuh-alert
+            json.keys_under_root: true
+            json.overwrite_keys: true
+
+          - type: log
+            enabled: true
+            paths:
+              - /var/ossec/logs/archives/archives.json
+            fields:
+              index: wazuh-archives
+              type: wazuh-archive
+            json.keys_under_root: true
+            json.overwrite_keys: true
+
+          output.elasticsearch:
+            hosts: ["localhost:9201"]
+            index: "wazuh-alerts-%{+yyyy.MM.dd}"
+            template.enabled: false
+
+          setup.template.enabled: false
+          setup.ilm.enabled: false
+
+          logging.level: info
+          logging.to_files: true
+          logging.files:
+            path: /var/log/filebeat
+            name: filebeat
+            keepfiles: 7
+            permissions: 0644
+        dest: /etc/filebeat/filebeat.yml
+        backup: yes
+      become: yes
+      notify: restart filebeat
+
+    - name: Enable and start Filebeat
+      systemd:
+        name: filebeat
+        enabled: yes
+        state: started
+      become: yes
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+      become: yes
+
+    # Wait for services to be ready
+    - name: Wait for Wazuh Indexer to be ready
+      uri:
+        url: "http://127.0.0.1:9201"
+        method: GET
+        status_code: 200
+      register: result
+      until: result.status == 200
+      retries: 10
+      delay: 30
+
+    - name: Wait for Wazuh Dashboard to be ready
+      uri:
+        url: "http://localhost:5601"
+        method: GET
+        status_code: [200, 302]
+      register: dashboard_result
+      until: dashboard_result.status in [200, 302]
+      retries: 10
+      delay: 30
+
+    - name: Check listening ports
+      shell: netstat -tlnp | grep -E "(1514|55000)"
+      register: port_check
+      ignore_errors: yes
+
+    - name: Display listening ports
+      debug:
+       var: port_check.stdout_lines
+
+    - name: Verify Wazuh API is responding
+      uri:
+        url: "https://localhost:55000/"
+        method: GET
+        validate_certs: no
+        status_code: [200, 401]  # 401 is expected without auth
+      register: api_response
+      retries: 5
+      delay: 10
+
+    - name: Display connection information
+      debug:
+        msg: |
+          Wazuh Stack successfully configured on Arch Linux!
+          
+          Services:
+          - Wazuh Dashboard: http://{{ ansible_default_ipv4.address }}:5601
+          - Wazuh Indexer: http://{{ ansible_default_ipv4.address }}:9201
+          - Wazuh Manager: {{ ansible_default_ipv4.address }}:1514
+          - Wazuh API: https://{{ ansible_default_ipv4.address }}:55000
+          
+          To connect agents, use manager IP: {{ ansible_default_ipv4.address }}
+          
+          Next steps:
+          1. Deploy agents to endpoints using the agent playbook
+          2. Configure Wazuh Dashboard visualizations and dashboards
+          3. Set up alerting rules as needed
+          4. Import Wazuh Dashboard templates if needed

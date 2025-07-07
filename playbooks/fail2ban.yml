@@ -1,0 +1,54 @@
+---
+- name: firewall config
+  hosts: new
+  become: yes
+  vars_files:
+    - ../secrets.yml
+  handlers:
+    - import_tasks: ../handlers/handlers.yml
+  vars:
+    ansible_become_pass: "{{ admin_password }}" 
+
+  tasks:
+    - name: Install fail2ban
+      ansible.builtin.package:
+        name: fail2ban
+        state: present
+      
+    - name: Create custom SSH jail configuration
+      ansible.builtin.copy:
+        dest: /etc/fail2ban/jail.d/custom-ssh.conf
+        content: |
+          [sshd]
+          enabled = true
+          port = ssh
+          filter = sshd
+          logpath = /var/log/auth.log
+          maxretry = 2
+          bantime = 3600
+          findtime = 600
+        mode: '0644'
+      notify: Restart fail2ban
+      
+    - name: Ensure fail2ban is enabled and started
+      ansible.builtin.service:
+        name: fail2ban
+        state: started
+        enabled: true
+        
+  #  - name: Create formatted summary
+  #    ansible.builtin.set_fact:
+  #      execution_summary:
+  #        create user: "{{ create_user }}"
+  #        create ssh directory: "{{ create_ssh_dir }}"
+  #        deploy ssh keys: "{{ deploy_ssh_keys }}"
+  #        ssh key: "{{ authorized_keys_content }}"
+  #        ssh config: "{{ configure_ssh }}"
+  #    delegate_to: localhost
+  #    run_once: true
+
+  #  - name: Display all registered results
+  #    ansible.builtin.debug:
+  #      var: execution_summary
+  #    delegate_to: localhost
+  #    run_once: tru        

@@ -1,0 +1,367 @@
+---
+# Wazuh Manager + ELK Stack Deployment (Central Server)
+- name: Deploy Wazuh Manager and ELK Stack
+  hosts: wazuh_manager
+  become: yes
+  vars:
+    elasticsearch_version: "8.11.0"
+    kibana_version: "8.11.0"
+    logstash_version: "8.11.0"
+    wazuh_version: "4.7.0"
+    
+  tasks:
+    # System preparation
+    - name: Update system packages
+      apt:
+        update_cache: yes
+        upgrade: dist
+        
+    - name: Install required packages
+      apt:
+        name:
+          - curl
+          - wget
+          - gnupg
+          - apt-transport-https
+          - software-properties-common
+          - openjdk-11-jdk
+          - python3-pip
+        state: present
+
+    # Configure Java environment
+    - name: Set JAVA_HOME environment variable
+      lineinfile:
+        path: /etc/environment
+        line: 'JAVA_HOME="/usr/lib/jvm/java-11-openjdk-amd64"'
+        create: yes
+
+    # Elasticsearch Installation
+    - name: Add Elasticsearch GPG key
+      apt_key:
+        url: https://artifacts.elastic.co/GPG-KEY-elasticsearch
+        state: present
+
+    - name: Add Elasticsearch repository
+      apt_repository:
+        repo: "deb https://artifacts.elastic.co/packages/8.x/apt stable main"
+        state: present
+
+    - name: Install Elasticsearch
+      apt:
+        name: "elasticsearch={{ elasticsearch_version }}"
+        state: present
+        
+    - name: Configure Elasticsearch
+      copy:
+        content: |
+          cluster.name: wazuh-cluster
+          node.name: wazuh-manager-node
+          path.data: /var/lib/elasticsearch
+          path.logs: /var/log/elasticsearch
+          network.host: 0.0.0.0
+          http.port: 9200
+          discovery.type: single-node
+          xpack.security.enabled: false
+          xpack.security.enrollment.enabled: false
+        dest: /etc/elasticsearch/elasticsearch.yml
+        backup: yes
+      notify: restart elasticsearch
+
+    - name: Set Elasticsearch heap size (min)
+      lineinfile:
+        path: /etc/elasticsearch/jvm.options
+        regexp: '^-Xms'
+        line: '-Xms2g'
+
+    - name: Set Elasticsearch heap size (max)
+      lineinfile:
+        path: /etc/elasticsearch/jvm.options
+        regexp: '^-Xmx'
+        line: '-Xmx2g'
+
+    - name: Enable and start Elasticsearch
+      systemd:
+        name: elasticsearch
+        enabled: yes
+        state: started
+
+    # Kibana Installation
+    - name: Install Kibana
+      apt:
+        name: "kibana={{ kibana_version }}"
+        state: present
+
+    - name: Configure Kibana
+      copy:
+        content: |
+          server.port: 5601
+          server.host: "0.0.0.0"
+          elasticsearch.hosts: ["http://localhost:9200"]
+          kibana.index: ".kibana"
+          logging.dest: /var/log/kibana/kibana.log
+        dest: /etc/kibana/kibana.yml
+        backup: yes
+      notify: restart kibana
+
+    - name: Enable and start Kibana
+      systemd:
+        name: kibana
+        enabled: yes
+        state: started
+
+    # Logstash Installation
+    - name: Install Logstash
+      apt:
+        name: "logstash={{ logstash_version }}"
+        state: present
+
+    - name: Configure Logstash pipeline for Wazuh
+      copy:
+        content: |
+          input {
+            beats {
+              port => 5044
+            }
+          }
+
+          filter {
+            if [agent][type] == "filebeat" {
+              if [fields][decoder] == "wazuh-alert" {
+                json {
+                  source => "message"
+                }
+                mutate {
+                  remove_field => [ "message", "beat", "input_type", "tags", "count", "@version", "log", "offset", "type", "@timestamp", "host" ]
+                }
+                date {
+                  match => [ "timestamp", "ISO8601" ]
+                  target => "@timestamp"
+                }
+              }
+            }
+          }
+
+          output {
+            elasticsearch {
+              hosts => ["localhost:9200"]
+              index => "wazuh-alerts-%{+YYYY.MM.dd}"
+            }
+          }
+        dest: /etc/logstash/conf.d/wazuh.conf
+      notify: restart logstash
+
+    - name: Enable and start Logstash
+      systemd:
+        name: logstash
+        enabled: yes
+        state: started
+
+    # Wazuh Manager Installation
+    - name: Add Wazuh GPG key
+      apt_key:
+        url: https://packages.wazuh.com/key/GPG-KEY-WAZUH
+        state: present
+
+    - name: Add Wazuh repository
+      apt_repository:
+        repo: "deb https://packages.wazuh.com/4.x/apt/ stable main"
+        state: present
+
+    - name: Install Wazuh Manager
+      apt:
+        name: "wazuh-manager={{ wazuh_version }}-*"
+        state: present
+
+    - name: Configure Wazuh Manager
+      copy:
+        content: |
+          <ossec_config>
+            <global>
+              <email_notification>no</email_notification>
+              <logall>yes</logall>
+              <logall_json>yes</logall_json>
+              <alerts_log>yes</alerts_log>
+            </global>
+
+            <alerts>
+              <log_alert_level>3</log_alert_level>
+              <email_alert_level>12</email_alert_level>
+            </alerts>
+
+            <remote>
+              <connection>secure</connection>
+              <port>1514</port>
+              <protocol>udp</protocol>
+            </remote>
+
+            <localfile>
+              <log_format>syslog</log_format>
+              <location>/var/log/auth.log</location>
+            </localfile>
+
+            <localfile>
+              <log_format>syslog</log_format>
+              <location>/var/log/syslog</location>
+            </localfile>
+
+            <rootcheck>
+              <disabled>no</disabled>
+              <check_files>yes</check_files>
+              <check_trojans>yes</check_trojans>
+              <check_dev>yes</check_dev>
+              <check_sys>yes</check_sys>
+              <check_pids>yes</check_pids>
+              <check_ports>yes</check_ports>
+              <check_if>yes</check_if>
+            </rootcheck>
+
+            <syscheck>
+              <disabled>no</disabled>
+              <frequency>79200</frequency>
+              <scan_on_start>yes</scan_on_start>
+              <directories check_all="yes">/etc,/usr/bin,/usr/sbin</directories>
+              <directories check_all="yes">/bin,/sbin</directories>
+              <ignore>/etc/mtab</ignore>
+              <ignore>/etc/random-seed</ignore>
+              <ignore>/etc/adjtime</ignore>
+            </syscheck>
+
+            <command>
+              <name>host-deny</name>
+              <executable>host-deny.sh</executable>
+              <expect>srcip</expect>
+              <timeout_allowed>yes</timeout_allowed>
+            </command>
+
+            <active-response>
+              <disabled>no</disabled>
+              <command>host-deny</command>
+              <location>local</location>
+              <level>6</level>
+              <timeout>600</timeout>
+            </active-response>
+          </ossec_config>
+        dest: /var/ossec/etc/ossec.conf
+        backup: yes
+      notify: restart wazuh-manager
+
+    - name: Enable and start Wazuh Manager
+      systemd:
+        name: wazuh-manager
+        enabled: yes
+        state: started
+
+    # Wazuh API Installation
+    - name: Install Wazuh API
+      apt:
+        name: "wazuh-api={{ wazuh_version }}-*"
+        state: present
+
+    - name: Enable and start Wazuh API
+      systemd:
+        name: wazuh-api
+        enabled: yes
+        state: started
+
+    # Filebeat for Wazuh
+    - name: Install Filebeat
+      apt:
+        name: filebeat
+        state: present
+
+    - name: Configure Filebeat for Wazuh
+      copy:
+        content: |
+          filebeat.inputs:
+          - type: log
+            enabled: true
+            paths:
+              - /var/ossec/logs/alerts/alerts.json
+            fields:
+              logstash_codec: json
+              decoder: wazuh-alert
+
+          - type: log
+            enabled: true
+            paths:
+              - /var/ossec/logs/archives/archives.json
+            fields:
+              logstash_codec: json
+              decoder: wazuh-archive
+
+          output.logstash:
+            hosts: ["localhost:5044"]
+
+          logging.level: info
+          logging.to_files: true
+          logging.files:
+            path: /var/log/filebeat
+            name: filebeat
+            keepfiles: 7
+            permissions: 0644
+        dest: /etc/filebeat/filebeat.yml
+        backup: yes
+      notify: restart filebeat
+
+    - name: Enable and start Filebeat
+      systemd:
+        name: filebeat
+        enabled: yes
+        state: started
+
+    # Firewall configuration for Manager
+    - name: Configure UFW firewall
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+      loop:
+        - "22"      # SSH
+        - "9200"    # Elasticsearch
+        - "5601"    # Kibana
+        - "5044"    # Logstash Beats input
+        - "1514"    # Wazuh agent communication
+        - "1515"    # Wazuh agent enrollment
+        - "514"     # Wazuh syslog
+        - "55000"   # Wazuh API
+
+    - name: Enable UFW
+      ufw:
+        state: enabled
+
+    # Wait for services to be ready
+    - name: Wait for Elasticsearch to be ready
+      uri:
+        url: "http://localhost:9200"
+        method: GET
+        status_code: 200
+      register: result
+      until: result.status == 200
+      retries: 5
+      delay: 30
+
+    - name: Wait for Kibana to be ready
+      uri:
+        url: "http://localhost:5601"
+        method: GET
+        status_code: 200
+      register: kibana_result
+      until: kibana_result.status == 200
+      retries: 10
+      delay: 30
+
+    - name: Display connection information
+      debug:
+        msg: |
+          Wazuh Manager successfully deployed!
+          
+          Services:
+          - Kibana Dashboard: http://{{ ansible_default_ipv4.address }}:5601
+          - Elasticsearch: http://{{ ansible_default_ipv4.address }}:9200
+          - Wazuh API: https://{{ ansible_default_ipv4.address }}:55000
+          
+          To connect agents, use manager IP: {{ ansible_default_ipv4.address }}
+          
+          Next steps:
+          1. Deploy agents to endpoints using the agent playbook
+          2. Configure Kibana dashboards for Wazuh
+          3. Set up alerting rules as needed

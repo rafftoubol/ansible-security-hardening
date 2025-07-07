@@ -1,0 +1,183 @@
+---
+- name: Secure Metasploitable 2
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  vars:
+    new_root_password: "penis123"
+    vnc_password: "NewSecureVNCPassword123!"
+    tomcat_ip: "127.0.0.1"
+    tomcat_secret: "SecureAJPSecret123"
+    postgres_data_dir: "/var/lib/postgresql/8.3/main_secure"
+
+  tasks:
+
+    # Task 3: Change root password
+    - name: Change root password
+      ansible.builtin.user:
+        name: root
+        password: "{{ new_root_password }}"
+
+    # Task 4: Kill schedulers
+    - name: Stop and disable cron
+      ansible.builtin.service:
+        name: cron
+        state: stopped
+        enabled: no
+
+    - name: Remove at and batch jobs
+      ansible.builtin.command: atrm $(atq | awk '{print $1}')
+      ignore_errors: yes
+      changed_when: false
+
+    # Task 5: Reset /etc/exports
+    - name: Reset /etc/exports to default
+      ansible.builtin.copy:
+        src: files/default_exports
+        dest: /etc/exports
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Restart NFS
+
+    # Task 6: Set VNC password
+    - name: Set VNC password
+      ansible.builtin.command: "echo '{{ vnc_password }}' | vncpasswd -f > /etc/vnc/passwd"
+      args:
+        creates: /etc/vnc/passwd
+
+    # Task 7: Disable insecure services
+    - name: Disable telnet, rexec, rlogin
+      ansible.builtin.lineinfile:
+        path: /etc/inetd.conf
+        regexp: "^{{ item }}"
+        state: absent
+      with_items:
+        - "telnet"
+        - "shell"
+        - "login"
+      notify: Restart inetd
+
+    - name: Remove root shell spawn
+      ansible.builtin.lineinfile:
+        path: /etc/inetd.conf
+        regexp: "^ingreslock stream tcp nowait root /bin/bash bash -i"
+        state: absent
+      notify: Restart inetd
+
+    # Task 8: Uninstall IRCD
+    - name: Uninstall IRCD
+      ansible.builtin.apt:
+        name: ircd-irc2
+        state: absent
+        purge: yes
+
+    # Task 9: Secure FTP
+    - name: Update vsftpd config
+      ansible.builtin.lineinfile:
+        path: /etc/vsftpd.conf
+        regexp: "^anonymous_enable="
+        line: "anonymous_enable=NO"
+      notify: Restart vsftpd
+
+    - name: Block port 6200
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: 6200
+        jump: DROP
+        comment: "Block vulnerable port 6200"
+
+    # Task 10: Secure Samba
+    - name: Comment out vulnerable samba config
+      ansible.builtin.lineinfile:
+        path: /etc/samba/smb.conf
+        regexp: "^username map script"
+        line: "#username map script = /etc/samba/scripts/mapusers.sh"
+      notify: Restart samba
+
+    # Task 11: Update Apache/Tomcat
+    - name: Secure Tomcat AJP connector
+      ansible.builtin.lineinfile:
+        path: /etc/tomcat5.5/server.xml
+        regexp: '<Connector port="8009" protocol="AJP/1.3"'
+        line: '<Connector port="8009" protocol="AJP/1.3" redirectPort="8443" address="{{ tomcat_ip }}" secret="{{ tomcat_secret }}"/>'
+      notify: Restart tomcat
+
+    # Task 12: Patch DistCCd
+    - name: Update distcc
+      ansible.builtin.apt:
+        name: distcc
+        state: latest
+        update_cache: yes
+      notify: Restart distcc
+
+    # Task 13: Secure PostgreSQL
+    - name: Create new PostgreSQL data directory
+      ansible.builtin.file:
+        path: "{{ postgres_data_dir }}"
+        state: directory
+        owner: postgres
+        group: postgres
+        mode: '0700'
+
+    - name: Update PostgreSQL config
+      ansible.builtin.lineinfile:
+        path: /etc/postgresql/8.3/main/postgresql.conf
+        regexp: "^data_directory ="
+        line: "data_directory = '{{ postgres_data_dir }}'"
+      notify: Restart postgresql
+
+    # Task 14: Stop netcat on port 1524
+    - name: Find and kill netcat on port 1524
+      ansible.builtin.shell: |
+        kill $(lsof -t -i :1524)
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Ensure netcat doesn't restart
+      ansible.builtin.cron:
+        name: "netcat listener"
+        state: absent
+
+  handlers:
+    - name: Restart SSH
+      ansible.builtin.service:
+        name: ssh
+        state: restarted
+
+    - name: Restart NFS
+      ansible.builtin.service:
+        name: nfs-kernel-server
+        state: restarted
+
+    - name: Restart inetd
+      ansible.builtin.service:
+        name: inetd
+        state: restarted
+
+    - name: Restart vsftpd
+      ansible.builtin.service:
+        name: vsftpd
+        state: restarted
+
+    - name: Restart samba
+      ansible.builtin.service:
+        name: smbd
+        state: restarted
+
+    - name: Restart tomcat
+      ansible.builtin.service:
+        name: tomcat5.5
+        state: restarted
+
+    - name: Restart distcc
+      ansible.builtin.service:
+        name: distcc
+        state: restarted
+          
+    - name: Restart postgresql
+      ansible.builtin.service:
+        name: postgresql-8.3
+        state: restarted

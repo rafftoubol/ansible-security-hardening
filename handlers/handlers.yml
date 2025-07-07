@@ -1,0 +1,114 @@
+---
+- name: Restart SSH
+  ansible.builtin.service:
+    name: ssh
+    state: restarted
+    enabled: yes
+
+- name: Restart NFS
+  ansible.builtin.service:
+    name: nfs-kernel-server
+    state: restarted
+
+- name: Restart inetd
+  ansible.builtin.service:
+    name: inetd
+    state: restarted
+
+- name: Restart vsftpd
+  ansible.builtin.service:
+    name: vsftpd
+    state: restarted
+
+- name: Restart samba
+  ansible.builtin.service:
+    name: smbd
+    state: restarted
+
+- name: Restart tomcat
+  ansible.builtin.service:
+    name: tomcat5.5
+    state: restarted
+
+- name: Restart distcc
+  ansible.builtin.service:
+    name: distcc
+    state: restarted
+          
+- name: Restart postgresql
+  ansible.builtin.service:
+    name: postgresql-8.3
+    state: restarted   
+
+
+- name: Restart fail2ban
+  ansible.builtin.service:
+    name: fail2ban
+    state: restarted
+
+- name: restart wazuh-indexer
+  systemd:
+    name: wazuh-indexer
+    state: restarted
+
+- name: restart wazuh-dashboard
+  systemd:
+    name: wazuh-dashboard
+    state: restarted
+
+- name: restart wazuh-agent
+  systemd:
+    name: wazuh-agent
+    state: restarted
+
+- name: restart elasticsearch
+  systemd:
+    name: elasticsearch
+    state: restarted
+
+- name: restart kibana
+  systemd:
+    name: kibana
+    state: restarted
+
+- name: restart logstash
+  systemd:
+    name: logstash
+    state: restarted
+
+- name: restart wazuh-manager
+  systemd:
+    name: wazuh-manager
+    state: restarted
+
+- name: restart filebeat
+  systemd:
+    name: filebeat
+    state: restarted
+
+- name: restart fail2ban
+  systemd:
+    name: fail2ban
+    state: restarted
+
+- name: restart auditd
+  command: service auditd restart
+
+    # Final security report task
+- name: Generate initial security report
+  shell: |
+    echo "Endpoint Security Installation Complete - $(date)" > /var/log/security-setup.log
+    echo "Installed tools:" >> /var/log/security-setup.log
+    echo "- AIDE (Advanced Intrusion Detection Environment)" >> /var/log/security-setup.log
+    echo "- Fail2Ban (Intrusion Prevention)" >> /var/log/security-setup.log
+    echo "- RKHunter (Rootkit Detection)" >> /var/log/security-setup.log
+    echo "- ClamAV (Antivirus)" >> /var/log/security-setup.log
+    echo "- Lynis (Security Auditing)" >> /var/log/security-setup.log
+    echo "- Auditd (System Auditing)" >> /var/log/security-setup.log
+    echo "" >> /var/log/security-setup.log
+    echo "Next steps:" >> /var/log/security-setup.log
+    echo "1. Review and customize /etc/aide/aide.conf for your environment" >> /var/log/security-setup.log
+    echo "2. Test AIDE: aide --check" >> /var/log/security-setup.log
+    echo "3. Review fail2ban jails: fail2ban-client status" >> /var/log/security-setup.log
+    echo "4. Run initial Lynis audit: lynis audit system" >> /var/log/security-setup.log
+    cat /var/log/security-setup.log

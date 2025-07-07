@@ -1,0 +1,21 @@
+---
+- name: Initial SSH key deployment
+  hosts: metasploitable
+  gather_facts: no
+  vars:
+    ansible_user: "your_username"
+    ansible_password: "your_password"
+    ansible_become_pass: "your_sudo_password"  # if needed
+
+  tasks:
+    - name: Ensure .ssh directory exists
+      ansible.builtin.file:
+        path: /root/.ssh
+        state: directory
+        mode: '0700'
+
+    - name: Deploy authorized key
+      ansible.builtin.copy:
+        content: "{{ lookup('file', 'files/ed_id25519.pub') }}"
+        dest: /root/.ssh/authorized_keys
+        mode: '0600'

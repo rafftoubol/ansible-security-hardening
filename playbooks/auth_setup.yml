@@ -1,0 +1,85 @@
+---
+- name: ansible user setup (and key placement)
+  hosts: new
+  become: no
+  handlers:
+    - import_tasks: ../handlers/handlers.yml
+  vars:
+    new_ansible_user: "ansible_admin"
+    ansible_become_pass: "changeme"
+  vars_files: 
+    - ../secrets.yml
+  vars_prompt: 
+      - name: ansible_ssh_user
+        prompt: "Enter initial SSH username"
+        private: no
+  
+      - name: ansible_ssh_pass
+        prompt: "Enter initial SSH password"
+        private: yes
+        confirm: yes
+  tasks:
+  ## First we have to setup an admin user
+  # 1. create the user, plaintext var for name and vault for pw
+    - name: Create ansible admin user
+      ansible.builtin.user:
+        name: "{{ new_ansible_user }}"
+        password: "{{ admin_password | password_hash('sha512') }}"
+        groups: "sudo"
+        shell: /bin/bash
+        create_home: yes
+      register: create_user
+    # 2. Set up SSH directory structure
+    - name: Create .ssh directory for new user
+      ansible.builtin.file:
+        path: "/home/{{ new_ansible_user }}/.ssh"
+        state: directory
+        mode: '0700'
+        owner: "{{ new_ansible_user }}"
+        group: "{{ new_ansible_user }}"
+      register: create_ssh_dir
+    # 3. Deploy public key from ./keys/
+    - name: Deploy SSH public key
+      ansible.builtin.lineinfile:
+       path: "/home/{{ new_ansible_user }}/.ssh/authorized_keys"
+       create: yes
+       line: "{{ lookup('file', '../keys/id_rsa4096.pub') }}"
+       state: present
+       mode: '0600'
+       owner: "{{ new_ansible_user }}"
+       group: "{{ new_ansible_user }}"
+      register: deploy_ssh_keys
+    # Just for debugging when i was troubleshooting
+    - name: Read authorized_keys content
+      ansible.builtin.command: cat "/home/{{ new_ansible_user }}/.ssh/authorized_keys"
+      register: authorized_keys_content
+      changed_when: false
+
+    # 4. Harden SSHD configuration
+    - name: Configure SSH daemon
+      ansible.builtin.template:
+        src: ../templates/ssh/sshd_config.j2
+        dest: /etc/ssh/sshd_config
+        owner: root
+        group: root
+        mode: '0600'
+      notify: Restart SSH
+      register: configure_ssh
+
+    - name: Create formatted summary
+      ansible.builtin.set_fact:
+        execution_summary:
+          create user: "{{ create_user }}"
+          create ssh directory: "{{ create_ssh_dir }}"
+          deploy ssh keys: "{{ deploy_ssh_keys }}"
+          ssh key: "{{ authorized_keys_content }}"
+          ssh config: "{{ configure_ssh }}"
+      delegate_to: localhost
+      run_once: true
+
+    - name: Display all registered results
+      ansible.builtin.debug:
+        var: execution_summary
+      delegate_to: localhost
+      run_once: true
+

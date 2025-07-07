@@ -1,0 +1,55 @@
+---
+- name: firewall config
+  hosts: new
+  become: yes
+  vars_files:
+    - ../secrets.yml
+  handlers:
+    - import_tasks: ../handlers/handlers.yml
+  vars:
+    ansible_become_pass: "{{ admin_password }}" 
+    allowed_ports:
+      - 22/tcp    # SSH
+      - 1957/tcp
+
+  tasks:
+    # 1. Install UFW
+    - name: Ensure UFW is installed
+      ansible.builtin.apt:
+        name: ufw
+        state: present
+        update_cache: yes
+
+    # 2. Reset UFW (optional)
+    - name: Reset UFW rules
+      ansible.builtin.command: ufw --force reset
+      changed_when: false
+      ignore_errors: yes
+
+    # 3. Set default policies
+    - name: Set default deny incoming/allow outgoing
+      ansible.builtin.command: ufw default {{ item.policy }} {{ item.direction }}
+      loop:
+        - { policy: 'deny', direction: 'incoming' }
+        - { policy: 'allow', direction: 'outgoing' }
+
+    # 4. Allow specified ports
+    - name: Allow listed ports
+      ansible.builtin.command: ufw allow {{ item }}
+      loop: "{{ allowed_ports }}"
+      register: ufw_rules
+      changed_when: "'Rule added' in ufw_rules.stdout"
+
+    # 5. Enable UFW
+    - name: Enable firewall
+      ansible.builtin.command: ufw --force enable
+
+    # 6. Verify
+    - name: Show UFW status
+      ansible.builtin.command: ufw status numbered
+      register: ufw_status
+      changed_when: false
+
+    - name: Display firewall rules
+      ansible.builtin.debug:
+        msg: "{{ ufw_status.stdout_lines }}"
